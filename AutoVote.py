@@ -1460,7 +1460,6 @@ def screenshot(user_id, info, override_name=None):
         return 1
 
 def auto_screenshot(user_id, stock_id):
-    # 此處已刪除重複出現的函式，並確保只保留這一個正確的修正版
     global driver, session_results, user_name_map, shot_speed, name_source_mode
     try: driver.implicitly_wait(0.01)
     except: pass
@@ -1491,237 +1490,273 @@ def auto_screenshot(user_id, stock_id):
        # --- 【強化：單筆補圖查詢加入強力點擊】 ---
         search_btn = driver.find_element(By.CSS_SELECTOR,'a[onclick="qryByStockId();"]')
         try:
-            search_btn.click() # 先嘗試一般點擊
+            search_btn.click() 
         except:
-            # 若被隱形遮罩或彈窗擋住，直接用 JS 無視遮罩硬點
             driver.execute_script("arguments[0].click();", search_btn)
         # ----------------------------------------
-        found_result = False
-        row_status_text = "" # 新增變數來儲存該列的文字
-        for _ in range(100): 
-            time.sleep(base_wait)
+        
+        # === 🌟 修正一：確保表格完全載入後再計算筆數 ===
+        matching_rows_count = 0
+        stable_count = 0
+        for _ in range(50): 
+            time.sleep(base_wait * 2)
             try:
                 rows = driver.find_elements(By.TAG_NAME,'tr')
-                if len(rows) > 1 and str(stock_id) in rows[1].text:
-                    found_result = True
-                    row_status_text = rows[1].text # 抓取整列的文字內容
-                    break
+                current_count = 0
+                if len(rows) > 1:
+                    for r_idx in range(1, len(rows)):
+                        if str(stock_id) in rows[r_idx].text:
+                            current_count += 1
+                            
+                if current_count > 0:
+                    if current_count == matching_rows_count:
+                        stable_count += 1
+                        if stable_count >= 2: # 連續確認數量沒有變動，代表已經全部載入
+                            break
+                    else:
+                        matching_rows_count = current_count
+                        stable_count = 0
             except: pass
             
-        if not found_result:
+        if matching_rows_count == 0:
             log_msg(f"找不到代號: {stock_id}")
             session_results[user_id]['fail_screenshot'].append(stock_id)
             return 2
 
-        # --- 【新增：檢查是否為未投票】 ---
-        if "未投票" in row_status_text:
-            log_msg(f"[{stock_id}] 狀態為「未投票」，跳過截圖任務。")
-            session_results[user_id]['fail_screenshot'].append(f"{stock_id} (未投票)")
-            return 2
-        # --------------------------------
-        # ==================== 請在此處加入以下代碼 ====================
-        # --- 【新增：檢查是否符合 E-Gift 資格 (免截圖)】 ---
-        try:
-            rows = driver.find_elements(By.TAG_NAME,'tr')
-            if len(rows) > 1:
-                tds = rows[1].find_elements(By.TAG_NAME, 'td')
+        final_return_code = 0
+        
+        for row_index in range(1, matching_rows_count + 1):
+            try:
+                # 重新抓取列
+                rows = driver.find_elements(By.TAG_NAME,'tr')
+                if row_index >= len(rows):
+                    log_msg(f"第 {row_index} 筆無法定位 (可能表格未載入完整)")
+                    break
+                    
+                current_row = rows[row_index]
+                row_status_text = current_row.text
+                
+                if "未投票" in row_status_text:
+                    log_msg(f"[{stock_id}] 第 {row_index} 筆狀態為「未投票」，跳過截圖任務。")
+                    session_results[user_id]['fail_screenshot'].append(f"{stock_id} (未投票)")
+                    if final_return_code == 0: final_return_code = 2
+                    continue
+
+                tds = current_row.find_elements(By.TAG_NAME, 'td')
                 if len(tds) >= 5:
                     egift_text = tds[4].text.strip()
                     if "Y" in egift_text:
-                        # ===== 請加入這兩行 =====
                         global session_egift_count
                         session_egift_count += 1
-                        # ======================
-                        log_msg(f"[{stock_id}] 符合 E-Gift 資格，跳過截圖！")
+                        log_msg(f"[{stock_id}] 第 {row_index} 筆符合 E-Gift 資格，跳過截圖！")
                         report_text = f"{stock_id} (E-Gift免截圖)"
                         session_results[user_id]['success_screenshot'].append(report_text)
-                        return 0 # 直接回傳 0 (代表成功，從待辦佇列中移除)
-        except Exception as e:
-            pass
-        # ==========================================================
-        voteinfo = []
-        try:
-            row = driver.find_elements(By.TAG_NAME,'tr')[1]
-            parts = row.text.split(" ")
-            voteinfo.extend(parts[0:2])
-            report_text = f"{voteinfo[0]} {voteinfo[1]}".strip() if len(voteinfo) > 1 else stock_id
+                        continue 
+                        
+                parts = row_status_text.split(" ")
+                voteinfo = parts[0:2]
+                
+                # === 🌟 檔名與重複檢測優化 ===
+                if matching_rows_count > 1:
+                    voteinfo[1] = f"{voteinfo[1]}-{row_index}"
+                
+                report_text = f"{voteinfo[0]} {voteinfo[1]}".strip() if len(voteinfo) > 1 else stock_id
 
-            # ================= 【第一道防線：列表頁提前比對】 =================
-            import glob
-            stock_id_str = voteinfo[0]
-            stock_name_str = clean_filename(voteinfo[1].replace('*',''))
-            if len(stock_name_str) > 20: stock_name_str = stock_name_str[:20]
+                import glob
+                stock_id_str = voteinfo[0]
+                stock_name_str = clean_filename(voteinfo[1].replace('*',''))
+                if len(stock_name_str) > 20: stock_name_str = stock_name_str[:20]
+                
+                current_user_name = clean_filename(user_name_map.get(user_id, str(user_id)))
+                safe_display_name = current_user_name if len(current_user_name) < 10 else current_user_name[:10]
 
-            # 抓取並清理當前 UI 帳號名稱
-            current_user_name = clean_filename(user_name_map.get(user_id, str(user_id)))
-            safe_display_name = current_user_name if len(current_user_name) < 10 else current_user_name[:10]
+                # ================= 【第一道防線：列表頁提前比對】 =================
+                if matching_rows_count == 1:
+                    pattern_mode1 = os.path.join(base_path, current_user_name, f"*_{stock_id_str}_{stock_name_str}.png")
+                    pattern_mode2 = os.path.join(base_path, f"*_{stock_id_str}_{stock_name_str}_{safe_display_name}.png")
 
-            pattern_mode1 = os.path.join(base_path, current_user_name, f"*_{stock_id_str}_{stock_name_str}.png")
-            pattern_mode2 = os.path.join(base_path, f"*_{stock_id_str}_{stock_name_str}_{safe_display_name}.png")
-
-            if glob.glob(pattern_mode1) or glob.glob(pattern_mode2):
-                log_msg(f"[{stock_id_str}] [{current_user_name}] 圖片已存在，提前跳過截圖。")
-                session_results[user_id]['success_screenshot'].append(f"{report_text} (已存在跳過)")
-                return 0
-            # ===========================================================================
-            
-            page_loaded = False
-            for attempt in range(5):
-                try:
-                    if driver.find_elements(By.CSS_SELECTOR, 'button[onclick*="back"], input[onclick*="back"]'):
-                        page_loaded = True
-                        break
-                    
-                    # 【修正處 1】不要把對話框當作載入完成，而是點擊關閉它
-                    msg_btns = driver.find_elements(By.ID, "msgDialog_okBtn")
-                    if msg_btns and msg_btns[0].is_displayed():
-                        msg_btns[0].click()
-                        time.sleep(base_wait)
-                except: pass
-
-                try:
-                    current_row = driver.find_elements(By.TAG_NAME,'tr')[1]
-                    links = current_row.find_elements(By.TAG_NAME,'a')
-                    target_link = None
-                    for link in links:
-                        if "查詢" in link.text:
-                            target_link = link
-                            break
-                    if target_link:
-                        if attempt > 0: log_msg(f"第 {attempt+1} 次嘗試進入頁面...")
-                        target_link.click()
-                        check_limit = 100 
-                        for _ in range(check_limit):
-                            if driver.find_elements(By.CSS_SELECTOR, 'button[onclick*="back"], input[onclick*="back"]'):
-                                page_loaded = True
-                                break
-                            
-                            # 【修正處 2】點擊查詢後的等待過程中，如果跳出抽獎等對話框，一樣點擊關閉繼續等，不要中斷
-                            msg_btns = driver.find_elements(By.ID, "msgDialog_okBtn")
-                            if msg_btns and msg_btns[0].is_displayed():
-                                try: msg_btns[0].click()
-                                except: pass
-                                
-                            time.sleep(base_wait)
-                        if page_loaded: break 
-                    else:
-                        time.sleep(base_wait * 2)
+                    if glob.glob(pattern_mode1) or glob.glob(pattern_mode2):
+                        log_msg(f"[{stock_id_str}] [{current_user_name}] 圖片已存在，提前跳過截圖。")
+                        session_results[user_id]['success_screenshot'].append(f"{report_text} (已存在跳過)")
                         continue
-                except: time.sleep(base_wait * 2)
-            
-            if not page_loaded:
-                try:
-                    nav_btns = driver.find_elements(By.XPATH, "//button | //a | //input[@type='button']")
-                    for btn in nav_btns:
-                        if not btn.is_displayed(): continue
-                        txt = btn.text.strip()
-                        val = btn.get_attribute("value")
-                        check_str = (txt + str(val)).strip()
-                        if "返回" in check_str or "上一頁" in check_str or "列表" in check_str:
+                # ===========================================================================
+
+                page_loaded = False
+                for attempt in range(5):
+                    try:
+                        if driver.find_elements(By.CSS_SELECTOR, 'button[onclick*="back"], input[onclick*="back"]'):
                             page_loaded = True
                             break
+                        msg_btns = driver.find_elements(By.ID, "msgDialog_okBtn")
+                        if msg_btns and msg_btns[0].is_displayed():
+                            msg_btns[0].click()
+                            time.sleep(base_wait)
+                    except: pass
+
+                    try:
+                        current_row = driver.find_elements(By.TAG_NAME,'tr')[row_index]
+                        links = current_row.find_elements(By.TAG_NAME,'a')
+                        target_link = None
+                        for link in links:
+                            if "查詢" in link.text:
+                                target_link = link
+                                break
+                        if target_link:
+                            if attempt > 0: log_msg(f"第 {attempt+1} 次嘗試進入頁面...")
+                            target_link.click()
+                            for _ in range(100):
+                                if driver.find_elements(By.CSS_SELECTOR, 'button[onclick*="back"], input[onclick*="back"]'):
+                                    page_loaded = True
+                                    break
+                                msg_btns = driver.find_elements(By.ID, "msgDialog_okBtn")
+                                if msg_btns and msg_btns[0].is_displayed():
+                                    try: msg_btns[0].click()
+                                    except: pass
+                                time.sleep(base_wait)
+                            if page_loaded: break 
+                        else:
+                            time.sleep(base_wait * 2)
+                            continue
+                    except: time.sleep(base_wait * 2)
+
+                if not page_loaded:
+                    try:
+                        nav_btns = driver.find_elements(By.XPATH, "//button | //a | //input[@type='button']")
+                        for btn in nav_btns:
+                            if not btn.is_displayed(): continue
+                            txt = btn.text.strip()
+                            val = btn.get_attribute("value")
+                            check_str = (txt + str(val)).strip()
+                            if "返回" in check_str or "上一頁" in check_str or "列表" in check_str:
+                                page_loaded = True
+                                break
+                    except: pass
+
+                if not page_loaded:
+                    log_msg(f"[{stock_id}] 第 {row_index} 筆進入內頁失敗，跳過截圖")
+                    session_results[user_id]['fail_screenshot'].append(report_text)
+                    if final_return_code == 0: final_return_code = 2
+                    continue
+
+                try: driver.execute_script("document.body.style.zoom = '100%'")
                 except: pass
 
-            if not page_loaded:
-                log_msg(f"[{stock_id}] 進入內頁失敗，跳過截圖")
-                session_results[user_id]['fail_screenshot'].append(report_text)
-                return 2
-
-            try: driver.execute_script("document.body.style.zoom = '100%'")
-            except: pass
-
-            # 預設使用程式自訂的名稱
-            actual_display_name = user_name_map.get(user_id, str(user_id))
-
-            if name_source_mode == 2: # 模式 2：精準抓取網頁實際戶名 (針對股東e票通表格結構)
-                detected_name = ""
-                start_search = time.time()
-                while time.time() - start_search < 3.0:
-                    try:
-                        btn = driver.find_element(By.ID, "msgDialog_okBtn")
-                        if btn.is_displayed(): btn.click()
-                    except: pass
-                    try: driver.execute_script("document.body.style.zoom = '100%'")
-                    except: pass
-                    
-                    try:
-                        # 【精準策略 1】針對現有 HTML 結構：找 th 標籤包含 '戶名'，然後取它相鄰的 td
+                actual_display_name = user_name_map.get(user_id, str(user_id))
+                
+                if name_source_mode == 2:
+                    detected_name = ""
+                    start_search = time.time()
+                    while time.time() - start_search < 3.0:
                         try:
-                            name_td = driver.find_element(By.XPATH, "//th[contains(text(), '戶名')]/following-sibling::td")
-                            if name_td and name_td.text.strip():
-                                detected_name = name_td.text.strip()
+                            btn = driver.find_element(By.ID, "msgDialog_okBtn")
+                            if btn.is_displayed(): btn.click()
                         except: pass
-
-                        # 【備用策略 2】如果找不到 th，改找整列 tr 包含 '戶名'，並取出裡面的 td
-                        if not detected_name:
+                        try: driver.execute_script("document.body.style.zoom = '100%'")
+                        except: pass
+                        
+                        try:
                             try:
-                                trs = driver.find_elements(By.TAG_NAME, "tr")
-                                for tr in trs:
-                                    if "戶名" in tr.text:
-                                        tds = tr.find_elements(By.TAG_NAME, "td")
-                                        if tds:
-                                            # 名字通常在該列的最後一個格子裡
-                                            detected_name = tds[-1].text.strip()
-                                            break
+                                name_td = driver.find_element(By.XPATH, "//th[contains(text(), '戶名')]/following-sibling::td")
+                                if name_td and name_td.text.strip():
+                                    detected_name = name_td.text.strip()
                             except: pass
+                            
+                            if not detected_name:
+                                try:
+                                    trs = driver.find_elements(By.TAG_NAME, "tr")
+                                    for tr in trs:
+                                        if "戶名" in tr.text:
+                                            tds = tr.find_elements(By.TAG_NAME, "td")
+                                            if tds:
+                                                detected_name = tds[-1].text.strip()
+                                                break
+                                except: pass
+                                
+                            if not detected_name:
+                                body_text = driver.find_element(By.TAG_NAME, "body").text
+                                match = re.search(r'戶名\s*[:：]?\s*([^\s　]+)', body_text)
+                                if match:
+                                    potential_name = match.group(1)
+                                    if 2 <= len(potential_name) <= 20:
+                                        detected_name = potential_name
 
-                        # 【備用策略 3】原有的正則暴力法 (終極保底)
-                        if not detected_name:
-                            body_text = driver.find_element(By.TAG_NAME, "body").text
-                            import re
-                            match = re.search(r'戶名\s*[:：]?\s*([^\s　]+)', body_text)
-                            if match:
-                                potential_name = match.group(1)
-                                if 2 <= len(potential_name) <= 20:
-                                    detected_name = potential_name
+                            if detected_name:
+                                clean_name = clean_filename(detected_name)
+                                actual_display_name = clean_name
+                                log_msg(f"成功抓到實際戶名: {clean_name}")
+                                break
+                        except: pass
+                        time.sleep(base_wait)
+                else:
+                    for _ in range(10):
+                        try:
+                            btn = driver.find_element(By.ID, "msgDialog_okBtn")
+                            if btn.is_displayed():
+                                btn.click()
+                                break 
+                        except: pass
+                        time.sleep(base_wait)
 
-                        if detected_name:
-                            clean_name = clean_filename(detected_name)
-                            actual_display_name = clean_name
-                            log_msg(f"成功抓到實際戶名: {clean_name}")
-                            break
-                    except: pass
-                    time.sleep(base_wait)
-            else:
-                # 模式 1：使用自訂名稱，只需負責把可能出現的系統提示框關掉
-                for _ in range(10):
-                    try:
-                        btn = driver.find_element(By.ID, "msgDialog_okBtn")
-                        if btn.is_displayed():
-                            btn.click()
-                            break 
-                    except: pass
-                    time.sleep(base_wait)
+                # ================= 【第二道防線：抓到實際戶名後再次比對】 =================
+                if matching_rows_count == 1:
+                    safe_actual_name = actual_display_name if len(actual_display_name) < 10 else actual_display_name[:10]
+                    pattern_mode1_real = os.path.join(base_path, actual_display_name, f"*_{stock_id_str}_{stock_name_str}.png")
+                    pattern_mode2_real = os.path.join(base_path, f"*_{stock_id_str}_{stock_name_str}_{safe_actual_name}.png")
 
-            # ================= 【第二道防線：抓到實際戶名後再次比對】 =================
-            # 解決「網頁實際戶名」與「設定頁名稱」不同導致第一道防線漏掉的問題
-            safe_actual_name = actual_display_name if len(actual_display_name) < 10 else actual_display_name[:10]
-            pattern_mode1_real = os.path.join(base_path, actual_display_name, f"*_{stock_id_str}_{stock_name_str}.png")
-            pattern_mode2_real = os.path.join(base_path, f"*_{stock_id_str}_{stock_name_str}_{safe_actual_name}.png")
+                    if glob.glob(pattern_mode1_real) or glob.glob(pattern_mode2_real):
+                        log_msg(f"[{stock_id_str}] [{actual_display_name}] 圖片已存在，跳過重複截圖。")
+                        session_results[user_id]['success_screenshot'].append(f"{report_text} (已存在跳過)")
+                        try: driver.execute_script("arguments[0].click();", driver.find_element(By.CSS_SELECTOR,'button[onclick="back(); return false;"]'))
+                        except: pass
+                        
+                        # === 🌟 修正二：跳過重複截圖時，一樣要等列表重新載入 ===
+                        for _ in range(50):
+                            time.sleep(base_wait * 2)
+                            try:
+                                if driver.find_elements(By.NAME, 'qryStockId'):
+                                    temp_rows = driver.find_elements(By.TAG_NAME, 'tr')
+                                    if len(temp_rows) > row_index: break
+                            except: pass
+                        continue
+                # ===========================================================================
 
-            if glob.glob(pattern_mode1_real) or glob.glob(pattern_mode2_real):
-                log_msg(f"[{stock_id_str}] [{actual_display_name}] 圖片已存在，跳過重複截圖。")
-                session_results[user_id]['success_screenshot'].append(f"{report_text} (已存在跳過)")
+                voteinfo.append("unknown") 
+                res = screenshot(user_id, voteinfo, override_name=actual_display_name)
+                if res != 0: 
+                    session_results[user_id]['fail_screenshot'].append(report_text)
+                    final_return_code = 1
+                else: 
+                    session_results[user_id]['success_screenshot'].append(report_text)
+                
                 try: driver.execute_script("arguments[0].click();", driver.find_element(By.CSS_SELECTOR,'button[onclick="back(); return false;"]'))
                 except: pass
-                return 0
-            # ===========================================================================
+                
+                # === 🌟 修正三：確保返回列表後，表格已經重新載入，避免下一個迴圈抓空 ===
+                for _ in range(50):
+                    time.sleep(base_wait * 2)
+                    try:
+                        if driver.find_elements(By.NAME, 'qryStockId'):
+                            temp_rows = driver.find_elements(By.TAG_NAME, 'tr')
+                            if len(temp_rows) > row_index:
+                                break
+                    except: pass
+                # =======================================================================
 
-            voteinfo.append("unknown") 
-            res = screenshot(user_id, voteinfo, override_name=actual_display_name) # 將算好的名稱傳過去
-            if res != 0: session_results[user_id]['fail_screenshot'].append(report_text)
-            else: session_results[user_id]['success_screenshot'].append(report_text)
-            
-            try: driver.execute_script("arguments[0].click();", driver.find_element(By.CSS_SELECTOR,'button[onclick="back(); return false;"]'))
-            except: pass
-            return res
-        except Exception as e:
-            log_msg(f"流程錯誤: {e}")
-            fail_record = locals().get('report_text', stock_id)
-            session_results[user_id]['fail_screenshot'].append(fail_record)
-            return 1
-    except: return 1
+            except Exception as e:
+                log_msg(f"第 {row_index} 筆流程錯誤: {e}")
+                fail_record = report_text if 'report_text' in locals() else f"{stock_id} (第 {row_index} 筆)"
+                session_results[user_id]['fail_screenshot'].append(fail_record)
+                final_return_code = 1
+                continue
 
+        return final_return_code
+        
+    except Exception as e:
+        log_msg(f"流程錯誤: {e}")
+        fail_record = locals().get('report_text', stock_id)
+        session_results[user_id]['fail_screenshot'].append(fail_record)
+        return 1
+    
 def scan_egifts_and_save(user_id):
     global driver, user_name_map, all_egift_records
     log_msg("=== 開始掃描 E-Gift 領取清單 ===")
